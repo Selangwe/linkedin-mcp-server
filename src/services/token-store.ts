@@ -75,7 +75,26 @@ export class KvTokenStore implements ITokenStore {
 
   private async client() {
     if (!this.redisPromise) {
-      this.redisPromise = import("@upstash/redis").then(({ Redis }) => Redis.fromEnv());
+      this.redisPromise = import("@upstash/redis").then(({ Redis }) => {
+        // Redis.fromEnv() only reads UPSTASH_REDIS_REST_URL / _TOKEN. Vercel's
+        // marketplace integration has used different prefixes for this over
+        // time (e.g. KV_REST_API_URL / KV_REST_API_TOKEN), so fall back to
+        // constructing the client manually from whichever pair is present.
+        try {
+          return Redis.fromEnv();
+        } catch {
+          const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+          const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+          if (!url || !token) {
+            throw new Error(
+              "No Redis credentials found. Checked UPSTASH_REDIS_REST_URL/_TOKEN and KV_REST_API_URL/_TOKEN. " +
+                "Check Project Settings → Environment Variables for the exact names your storage integration injected, " +
+                "and set UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN to match if needed."
+            );
+          }
+          return new Redis({ url, token });
+        }
+      });
     }
     return this.redisPromise;
   }
