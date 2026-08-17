@@ -3,18 +3,30 @@ import path from "path";
 import type { StoredTokens } from "../types.js";
 
 /**
- * Minimal file-backed token store.
+ * Storage abstraction for the single LinkedIn token record this server
+ * manages. Two implementations are provided:
  *
- * This is intentionally simple (single-user, single-file JSON) because this
- * server is meant to run privately for one LinkedIn account. If you need
- * multi-user support, swap this for a real database keyed by user id.
+ *  - FileTokenStore: writes a JSON file to disk. Works on any host with a
+ *    persistent volume (Fly.io, Railway, a plain VPS). Do NOT use this on
+ *    serverless/edge platforms (Vercel, most "container per request" hosts)
+ *    — the filesystem resets between invocations and tokens will vanish.
  *
- * IMPORTANT: TOKEN_STORE_PATH must point at a persistent disk/volume on
- * whatever host you deploy to. On platforms with ephemeral filesystems
- * (most serverless/container-per-request platforms), tokens will vanish on
- * every restart/redeploy and you'll need to re-run the OAuth flow.
+ *  - KvTokenStore: writes to Upstash Redis via @upstash/redis. This is the
+ *    right choice for Vercel — add the "Upstash for Redis" integration from
+ *    the Vercel Marketplace (Storage tab) and it injects the env vars
+ *    Redis.fromEnv() reads automatically. Also works anywhere else you'd
+ *    rather not manage a disk.
+ *
+ * Both are single-key stores: this server is single-user by design (one
+ * LinkedIn account). For multi-user support, key the store by user id.
  */
-export class TokenStore {
+export interface ITokenStore {
+  load(): Promise<StoredTokens | null>;
+  save(tokens: StoredTokens): Promise<void>;
+  clear(): Promise<void>;
+}
+
+export class FileTokenStore implements ITokenStore {
   private readonly filePath: string;
   private cache: StoredTokens | null = null;
 
@@ -48,4 +60,47 @@ export class TokenStore {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
   }
+}
+
+const KV_KEY = "linkedin-mcp-server:tokens";
+
+export class KvTokenStore implements ITokenStore {
+  // Typed loosely to avoid a hard compile-time dependency on @upstash/redis
+  // for consumers who only use FileTokenStore and never install it.
+  private redisPromise: Promise<{
+    get: (key: string) => Promise<unknown>;
+    set: (key: string, value: unknown) => Promise<unknown>;
+    del: (key: string) => Promise<unknown>;
+  }> | null = null;
+
+  private async client() {
+    if (!this.redisPromise) {
+      this.redisPromise = import("@upstash/redis").then(({ Redis }) => Redis.fromEnv());
+    }
+    return this.redisPromise;
+  }
+
+  async load(): Promise<StoredTokens | null> {
+    const redis = await this.client();
+    const value = await redis.get(KV_KEY);
+    if (!value) return null;
+    // @upstash/redis auto-deserializes JSON values; guard against either shape.
+    return typeof value === "string" ? (JSON.parse(value) as StoredTokens) : (value as StoredTokens);
+  }
+
+  async save(tokens: StoredTokens): Promise<void> {
+    const redis = await this.client();
+    await redis.set(KV_KEY, JSON.stringify(tokens));
+  }
+
+  async clear(): Promise<void> {
+    const redis = await this.client();
+    await redis.del(KV_KEY);
+  }
+}
+
+export function createTokenStore(): ITokenStore {
+  const driver = (process.env.TOKEN_STORE_DRIVER || "file").toLowerCase();
+  if (driver === "kv") return new KvTokenStore();
+  return new FileTokenStore(process.env.TOKEN_STORE_PATH || "./data/tokens.json");
 }

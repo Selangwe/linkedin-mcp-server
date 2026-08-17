@@ -39,13 +39,32 @@ for full one-shot automation.
 
 ## 2. Deploy the server
 
-This is a plain Node/Express app — deploy it anywhere that gives you:
-- a public HTTPS URL (for the OAuth redirect and for Claude to reach `/mcp`)
-- **persistent disk** at the path you set `TOKEN_STORE_PATH` to (Fly.io
-  volumes, Railway volumes, a small VPS, or any host with a real filesystem
-  all work; most serverless/edge platforms do NOT persist disk between
-  invocations and will break token storage — avoid those unless you swap
-  `TokenStore` for a real database)
+Two supported paths — pick based on where you want to host this.
+
+### Option A: Vercel (serverless)
+
+Vercel Functions have no persistent disk, so the file-based token store
+won't survive between requests. Use the built-in Redis-backed store instead:
+
+1. Push this repo to GitHub, then **import it in Vercel** (New Project → your repo). It's picked up automatically — `api/index.ts` is the serverless entrypoint, `vercel.json` routes everything there.
+2. In the Vercel project, go to **Storage → Marketplace Database Providers → Upstash → Redis** and create one. This injects Redis env vars into your project automatically.
+3. Add the rest of the environment variables (Project Settings → Environment Variables):
+   ```
+   LINKEDIN_CLIENT_ID=...
+   LINKEDIN_CLIENT_SECRET=...
+   LINKEDIN_REDIRECT_URI=https://<your-vercel-domain>/oauth/linkedin/callback
+   TOKEN_STORE_DRIVER=kv
+   MCP_AUTH_TOKEN=<a long random string>
+   ```
+4. Redeploy so the new env vars take effect.
+
+The 4.5 MB request-body limit on Vercel Functions doesn't affect this server
+— the PDF is fetched by an outbound request from `linkedin_post_carousel`
+(you pass a `pdf_url`, not the file itself), not received as an inbound
+upload. The 300s default duration on every plan is comfortably more than an
+upload+publish needs.
+
+### Option B: A host with a real disk (Fly.io, Railway, a VPS)
 
 ```bash
 npm install
@@ -59,11 +78,15 @@ Set these environment variables (see `.env.example`):
 LINKEDIN_CLIENT_ID=...
 LINKEDIN_CLIENT_SECRET=...
 LINKEDIN_REDIRECT_URI=https://<your-deployed-host>/oauth/linkedin/callback
+TOKEN_STORE_DRIVER=file
 TOKEN_STORE_PATH=./data/tokens.json   # point this at a persistent volume
 MCP_AUTH_TOKEN=<a long random string> # protects /mcp and /oauth/linkedin/start
 PORT=3000
 TRANSPORT=http
 ```
+
+Either way, you need a public HTTPS URL (for the OAuth redirect and for
+Claude to reach `/mcp`).
 
 ## 3. Authorize (one-time human step)
 

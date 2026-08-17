@@ -11,7 +11,7 @@ import type {
   DocumentUploadResult,
   CreatePostResult,
 } from "../types.js";
-import { TokenStore } from "./token-store.js";
+import type { ITokenStore } from "./token-store.js";
 
 export interface LinkedInClientConfig {
   clientId: string;
@@ -51,7 +51,7 @@ export function handleLinkedInApiError(error: unknown): string {
 export class LinkedInClient {
   constructor(
     private readonly config: LinkedInClientConfig,
-    private readonly store: TokenStore
+    private readonly store: ITokenStore
   ) {}
 
   // ---------------------------------------------------------------------
