@@ -105,10 +105,29 @@ shouldn't need repeating often.
 
 ## 4. Register as a connector
 
-Add `https://<your-deployed-host>/mcp` as a custom MCP connector, sending
-`Authorization: Bearer <MCP_AUTH_TOKEN>` on every request. Once connected,
-the four `linkedin_*` tools become available to any session that has this
-connector enabled.
+This server hosts its own minimal OAuth 2.1 authorization server
+(`/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`,
+`/register`, `/authorize`, `/token` — RFC9728, RFC8414, RFC7591, RFC8707,
+PKCE), so it can be added as a real **custom connector** wherever a client
+only supports "no auth" or full OAuth rather than a static bearer header
+(e.g. Claude's Settings → Connectors → Add custom connector UI):
+
+1. Add `https://<your-deployed-host>/mcp` as a custom connector's URL and
+   choose OAuth. Most clients handle Dynamic Client Registration and PKCE
+   automatically from there — no Client ID/Secret to paste in.
+2. When the client opens the authorization page in a browser, you'll be
+   asked to enter `MCP_AUTH_TOKEN`. That's the entire "login" step — this
+   server is single-user, so proving you know that value is the consent
+   gate. Submit it and you'll be redirected back with the connector
+   connected.
+3. Access tokens this layer issues are short-lived (1 hour) and refreshed
+   automatically by the client using the refresh token from step 2 — no
+   further action needed under normal use.
+
+If your client only supports a static bearer token (e.g. MCP Inspector, or
+`curl`), you can skip all of the above and just send
+`Authorization: Bearer <MCP_AUTH_TOKEN>` directly — the old path still
+works unchanged and is treated as a master key by the same `/mcp` route.
 
 ## Local development
 
@@ -125,7 +144,27 @@ development.
 ## Notes / limitations
 
 - Single-user by design (one LinkedIn account, one token file). Don't expose
-  this server publicly without `MCP_AUTH_TOKEN` set.
+  this server publicly without `MCP_AUTH_TOKEN` set — it protects `/mcp`,
+  `/oauth/linkedin/start`, and doubles as the consent gate on the connector
+  OAuth server's `/authorize` page.
+- The connector-facing OAuth layer (`/register`, `/authorize`, `/token`) is
+  intentionally separate from the LinkedIn-facing OAuth flow
+  (`/oauth/linkedin/start` / `/callback`) — the former lets *clients* (like
+  Claude) authenticate to *this server*; the latter lets *this server*
+  authenticate to *LinkedIn*. Don't confuse the two `code`/`token` exchanges
+  if you're debugging.
+- Registered OAuth clients, authorization codes, and issued access/refresh
+  tokens are stored the same way as the LinkedIn token (file or Redis, via
+  `TOKEN_STORE_DRIVER`) — see `src/services/kv-store.ts` /
+  `src/services/oauth-store.ts`. Access tokens expire in 1 hour; refresh
+  tokens don't expire but aren't rotated, matching this server's
+  single-operator threat model. If you ever need to revoke everything,
+  clear the `data/oauth-*` files (file driver) or flush those key prefixes
+  in Redis (kv driver).
+- Set `PUBLIC_BASE_URL` (e.g. `https://your-app.vercel.app`) if you're
+  behind a proxy that doesn't set `X-Forwarded-Proto`/`Host` correctly —
+  the OAuth metadata endpoints otherwise infer the base URL from the
+  incoming request.
 - LinkedIn posts published via `linkedin_create_post` / `linkedin_post_carousel`
   cannot be edited or deleted through this API — only from the LinkedIn UI.
   There's no "undo" tool here on purpose; double-check the caption and PDF
