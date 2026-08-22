@@ -11,7 +11,73 @@ function truncate(text: string): string {
   );
 }
 
+type TextBlock = { type: "text"; text: string };
+
+/**
+ * A trailing warning block for successful results when the LinkedIn session is
+ * heading for a deadline a human has to clear. Returned as its own content
+ * block rather than appended to the first one, so the JSON payload callers
+ * parse stays valid JSON.
+ *
+ * Never throws: a failed status lookup must not turn a successful post into an
+ * error.
+ */
+async function authWarningBlocks(client: LinkedInClient): Promise<TextBlock[]> {
+  try {
+    const status = await client.getAuthStatus();
+    if (!status.warning) return [];
+    return [{ type: "text", text: `⚠ LinkedIn auth: ${status.warning}` }];
+  } catch {
+    return [];
+  }
+}
+
 export function registerLinkedInTools(server: McpServer, client: LinkedInClient): void {
+  // -----------------------------------------------------------------------
+  server.registerTool(
+    "linkedin_auth_status",
+    {
+      title: "Check LinkedIn Auth Status",
+      description: `Report the health of this server's stored LinkedIn session: when the access token expires, whether a refresh token exists, and the date by which a human must re-authorize.
+
+Makes NO LinkedIn API call — it only reads the locally stored token record, so it is free and safe to call any time, including when posting is already failing.
+
+Returns JSON:
+  {
+    connected: boolean,
+    member_id?: string,
+    access_token_expires_at?: number,      // epoch ms
+    access_token_expires_in_days?: number,
+    has_refresh_token: boolean,            // false = hard stop, cannot renew itself
+    refresh_token_expires_at?: number,
+    hard_deadline_at?: number,             // epoch ms a HUMAN must re-authorize by
+    hard_deadline_in_days?: number,
+    warning?: string,                      // present only when action is needed
+    reauthorize_path: string
+  }
+
+Use this when: a LinkedIn tool returned an auth error, or you want to check before a scheduled/batch run whether the session will last. If 'warning' is set, tell the user to visit the reauthorize_path on this server.`,
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        const status = await client.getAuthStatus();
+        return {
+          content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
+          structuredContent: status as unknown as Record<string, unknown>,
+        };
+      } catch (error) {
+        return { isError: true, content: [{ type: "text", text: handleLinkedInApiError(error) }] };
+      }
+    }
+  );
+
   // -----------------------------------------------------------------------
   server.registerTool(
     "linkedin_get_profile",
@@ -37,7 +103,10 @@ Error Handling:
       try {
         const info = await client.getUserInfo();
         return {
-          content: [{ type: "text", text: truncate(JSON.stringify(info, null, 2)) }],
+          content: [
+            { type: "text", text: truncate(JSON.stringify(info, null, 2)) },
+            ...(await authWarningBlocks(client)),
+          ],
           structuredContent: info as unknown as Record<string, unknown>,
         };
       } catch (error) {
@@ -98,7 +167,10 @@ Error Handling:
         const { documentUrn } = await client.uploadDocument(pdfBytes, params.filename);
         const output = { documentUrn };
         return {
-          content: [{ type: "text", text: JSON.stringify(output) }],
+          content: [
+            { type: "text", text: JSON.stringify(output) },
+            ...(await authWarningBlocks(client)),
+          ],
           structuredContent: output,
         };
       } catch (error) {
@@ -165,7 +237,10 @@ Don't use when: you haven't uploaded the document yet (call linkedin_upload_docu
           visibility: params.visibility,
         });
         return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
+          content: [
+            { type: "text", text: JSON.stringify(result) },
+            ...(await authWarningBlocks(client)),
+          ],
           structuredContent: result as unknown as Record<string, unknown>,
         };
       } catch (error) {
@@ -230,7 +305,10 @@ Error Handling:
 
         const output = { documentUrn, ...postResult };
         return {
-          content: [{ type: "text", text: JSON.stringify(output) }],
+          content: [
+            { type: "text", text: JSON.stringify(output) },
+            ...(await authWarningBlocks(client)),
+          ],
           structuredContent: output,
         };
       } catch (error) {

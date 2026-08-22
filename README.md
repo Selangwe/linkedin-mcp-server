@@ -13,6 +13,7 @@ public server just to catch the redirect — this one *is* that server.
 | Tool | What it does |
 |---|---|
 | `linkedin_get_profile` | Read-only. Confirms which account is authenticated. |
+| `linkedin_auth_status` | Read-only, no API call. Reports token expiry and the date a human must re-authorize by. |
 | `linkedin_upload_document` | Uploads a PDF (from a URL) to LinkedIn as a document asset. Doesn't publish anything. |
 | `linkedin_create_post` | Publishes a post referencing an already-uploaded document. Irreversible. |
 | `linkedin_post_carousel` | Does both steps in one call: download PDF → upload → publish. Irreversible. |
@@ -98,10 +99,37 @@ https://<your-deployed-host>/oauth/linkedin/start?token=<MCP_AUTH_TOKEN>
 ```
 
 Click **Allow**. You'll land back on `/oauth/linkedin/callback`, which
-exchanges the code for an access + refresh token and saves them to
-`TOKEN_STORE_PATH`. The access token is refreshed automatically by the
-server on subsequent tool calls (refresh tokens last ~1 year), so this step
-shouldn't need repeating often.
+exchanges the code for tokens and saves them to `TOKEN_STORE_PATH`. That page
+tells you exactly when this session expires — read it, because the answer
+depends on your LinkedIn app.
+
+### Token lifetime & re-auth
+
+There are two cases, and they behave very differently:
+
+- **Your app is approved for programmatic refresh** (LinkedIn returned a
+  refresh token). The server refreshes the access token by itself, ahead of
+  expiry, and retries once if LinkedIn rejects a token mid-call. You still have
+  to repeat step 3 roughly **once a year** — refresh tokens last ~365 days and
+  LinkedIn does *not* extend that deadline when it issues a new access token.
+- **It isn't** (no refresh token returned). Nothing renews. Everything works for
+  ~60 days and then every tool call fails until you repeat step 3. The callback
+  page warns you about this explicitly, as does every successful tool result
+  once the deadline gets close.
+
+Check where you stand at any time — neither of these makes a LinkedIn API call:
+
+```bash
+curl -H "Authorization: Bearer $MCP_AUTH_TOKEN" https://<your-host>/auth/status
+```
+
+or ask the model to call the `linkedin_auth_status` tool. Both report
+`hard_deadline_at` — the date by which a human must re-authorize — plus a
+`warning` string that is only present when action is actually needed.
+
+Successful tool results carry that warning as an extra content block starting
+within 14 days of the deadline (tune with `LINKEDIN_AUTH_WARN_DAYS`), so a
+looming expiry surfaces while you're working rather than as a surprise failure.
 
 ## 4. Register as a connector
 

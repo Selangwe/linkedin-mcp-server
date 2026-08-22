@@ -28,18 +28,20 @@ export interface ITokenStore {
 
 export class FileTokenStore implements ITokenStore {
   private readonly filePath: string;
-  private cache: StoredTokens | null = null;
 
   constructor(filePath: string) {
     this.filePath = filePath;
   }
 
+  // Deliberately uncached. An earlier version memoized the record for the
+  // lifetime of the process, which meant a second process (or a `tsx watch`
+  // reload) refreshing the token left this one serving a dead access token
+  // forever. A local file read per call costs microseconds; correctness here
+  // is worth far more than that.
   async load(): Promise<StoredTokens | null> {
-    if (this.cache) return this.cache;
     try {
       const raw = await fs.readFile(this.filePath, "utf-8");
-      this.cache = JSON.parse(raw) as StoredTokens;
-      return this.cache;
+      return JSON.parse(raw) as StoredTokens;
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw err;
@@ -47,13 +49,11 @@ export class FileTokenStore implements ITokenStore {
   }
 
   async save(tokens: StoredTokens): Promise<void> {
-    this.cache = tokens;
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
     await fs.writeFile(this.filePath, JSON.stringify(tokens, null, 2), "utf-8");
   }
 
   async clear(): Promise<void> {
-    this.cache = null;
     try {
       await fs.unlink(this.filePath);
     } catch (err: unknown) {
@@ -64,6 +64,15 @@ export class FileTokenStore implements ITokenStore {
 
 const KV_KEY = "linkedin-mcp-server:tokens";
 
+/**
+ * How long a loaded record may be reused without going back to Redis. A single
+ * tool call reads the token several times (auth headers, member URN lookup,
+ * status check), and each read is a network round trip otherwise. This window
+ * is orders of magnitude smaller than the refresh buffer in linkedin-client.ts,
+ * so it can never cause an expired token to be used.
+ */
+const KV_CACHE_TTL_MS = 10_000;
+
 export class KvTokenStore implements ITokenStore {
   // Typed loosely to avoid a hard compile-time dependency on @upstash/redis
   // for consumers who only use FileTokenStore and never install it.
@@ -72,6 +81,8 @@ export class KvTokenStore implements ITokenStore {
     set: (key: string, value: unknown) => Promise<unknown>;
     del: (key: string) => Promise<unknown>;
   }> | null = null;
+
+  private cache: { value: StoredTokens | null; readAt: number } | null = null;
 
   private async client() {
     if (!this.redisPromise) {
@@ -100,21 +111,31 @@ export class KvTokenStore implements ITokenStore {
   }
 
   async load(): Promise<StoredTokens | null> {
+    if (this.cache && Date.now() - this.cache.readAt < KV_CACHE_TTL_MS) {
+      return this.cache.value;
+    }
     const redis = await this.client();
     const value = await redis.get(KV_KEY);
-    if (!value) return null;
     // @upstash/redis auto-deserializes JSON values; guard against either shape.
-    return typeof value === "string" ? (JSON.parse(value) as StoredTokens) : (value as StoredTokens);
+    const tokens = !value
+      ? null
+      : typeof value === "string"
+        ? (JSON.parse(value) as StoredTokens)
+        : (value as StoredTokens);
+    this.cache = { value: tokens, readAt: Date.now() };
+    return tokens;
   }
 
   async save(tokens: StoredTokens): Promise<void> {
     const redis = await this.client();
     await redis.set(KV_KEY, JSON.stringify(tokens));
+    this.cache = { value: tokens, readAt: Date.now() };
   }
 
   async clear(): Promise<void> {
     const redis = await this.client();
     await redis.del(KV_KEY);
+    this.cache = { value: null, readAt: Date.now() };
   }
 }
 

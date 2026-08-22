@@ -100,6 +100,19 @@ app.use(express.urlencoded({ extended: false })); // for the /authorize consent 
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
+/**
+ * Session health for the operator: when the LinkedIn token expires, whether it
+ * can renew itself, and the date a human has to re-authorize by. Reads only
+ * stored state — no LinkedIn API call.
+ */
+app.get("/auth/status", bearerAuth, async (_req, res) => {
+  try {
+    res.json(await linkedInClient.getAuthStatus());
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 // ============================================================================
 // MCP client OAuth (RFC9728 / RFC8414 / RFC7591 / RFC8707) — this is what
 // lets Claude's "Add custom connector" UI drive a real OAuth flow against
@@ -406,9 +419,39 @@ app.get("/oauth/linkedin/callback", async (req, res) => {
   try {
     await linkedInClient.exchangeCodeForTokens(code);
     const info = await linkedInClient.getUserInfo();
-    res.send(
-      `LinkedIn connected successfully as ${info.name ?? info.sub}. You can close this tab — the token is now stored and will be refreshed automatically.`
-    );
+    const status = await linkedInClient.getAuthStatus();
+
+    const fmt = (epochMs?: number) =>
+      epochMs === undefined ? "unknown" : new Date(epochMs).toISOString().slice(0, 10);
+
+    // Be honest about which of the two worlds this session is in. LinkedIn
+    // only issues refresh tokens to apps approved for programmatic refresh;
+    // without one this connection silently dies when the access token expires.
+    const renewal = status.has_refresh_token
+      ? `<p>A refresh token was stored, so the access token renews automatically. You will need to
+           repeat this step by <strong>${escapeHtml(fmt(status.refresh_token_expires_at))}</strong>
+           — LinkedIn does not extend that deadline on refresh.</p>`
+      : `<p class="warn"><strong>Warning: LinkedIn issued no refresh token for this session.</strong>
+           This connection cannot renew itself and will stop working on
+           <strong>${escapeHtml(fmt(status.access_token_expires_at))}</strong>, after which posting
+           fails until you repeat this step. To avoid a 60-day re-auth cycle, get the LinkedIn app
+           approved for programmatic refresh tokens.</p>`;
+
+    res.type("html").send(`<!doctype html>
+<html><head><meta charset="utf-8"><title>LinkedIn connected</title>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;max-width:560px;margin:80px auto;padding:0 16px;color:#111;line-height:1.5}
+  .warn{background:#fff4e5;border-left:4px solid #d97706;padding:12px 16px;border-radius:4px}
+  code{background:#f3f4f6;padding:2px 5px;border-radius:4px}
+</style></head>
+<body>
+<h2>LinkedIn connected</h2>
+<p>Authenticated as <strong>${escapeHtml(info.name ?? info.sub)}</strong>.
+   Access token valid until <strong>${escapeHtml(fmt(status.access_token_expires_at))}</strong>.</p>
+${renewal}
+<p>Check this any time with the <code>linkedin_auth_status</code> tool or
+   <code>GET /auth/status</code>. You can close this tab.</p>
+</body></html>`);
   } catch (err) {
     res.status(500).send(`Token exchange failed: ${err instanceof Error ? err.message : String(err)}`);
   }
