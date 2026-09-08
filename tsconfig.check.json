@@ -1,0 +1,12 @@
+{
+  // Type-checks everything the build doesn't: api/ (the Vercel entrypoint,
+  // excluded from tsconfig.json because rootDir must stay ./src for the dist
+  // layout) and test/. Without this, a break in api/index.ts only surfaces at
+  // deploy time.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "api/**/*", "test/**/*", "vitest.config.ts"]
+}
