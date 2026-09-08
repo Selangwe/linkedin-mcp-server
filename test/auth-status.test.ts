@@ -5,6 +5,13 @@ import type { StoredTokens } from "../src/types.js";
 
 const DAY_MS = 86_400_000;
 
+/**
+ * n days from now, plus a minute. The minute matters: getAuthStatus floors the
+ * remaining duration, so an exact multiple of DAY_MS reads back as n-1 once a
+ * millisecond has elapsed between constructing the fixture and asserting.
+ */
+const inDays = (n: number) => Date.now() + n * DAY_MS + 60_000;
+
 /** In-memory ITokenStore so these tests never touch disk or Redis. */
 class FakeTokenStore implements ITokenStore {
   constructor(private tokens: StoredTokens | null = null) {}
@@ -47,7 +54,7 @@ describe("getAuthStatus", () => {
   });
 
   it("treats the access token expiry as the hard deadline when no refresh token exists", async () => {
-    const expiresAt = Date.now() + 37 * DAY_MS;
+    const expiresAt = inDays(37);
     const status = await clientWith({
       access_token: "at",
       access_token_expires_at: expiresAt,
@@ -77,8 +84,8 @@ describe("getAuthStatus", () => {
     const status = await clientWith({
       access_token: "at",
       refresh_token: "rt",
-      access_token_expires_at: Date.now() + 30 * DAY_MS,
-      refresh_token_expires_at: Date.now() + 300 * DAY_MS,
+      access_token_expires_at: inDays(30),
+      refresh_token_expires_at: inDays(300),
     }).getAuthStatus();
 
     expect(status.has_refresh_token).toBe(true);
@@ -90,8 +97,8 @@ describe("getAuthStatus", () => {
     const status = await clientWith({
       access_token: "at",
       refresh_token: "rt",
-      access_token_expires_at: Date.now() + DAY_MS,
-      refresh_token_expires_at: Date.now() + 5 * DAY_MS,
+      access_token_expires_at: inDays(1),
+      refresh_token_expires_at: inDays(5),
     }).getAuthStatus();
 
     expect(status.warning).toContain("cannot be extended automatically");
@@ -102,8 +109,8 @@ describe("getAuthStatus", () => {
     const tokens: StoredTokens = {
       access_token: "at",
       refresh_token: "rt",
-      access_token_expires_at: Date.now() + DAY_MS,
-      refresh_token_expires_at: Date.now() + 20 * DAY_MS,
+      access_token_expires_at: inDays(1),
+      refresh_token_expires_at: inDays(20),
     };
 
     // 20 days out is quiet under the default 14-day window...
