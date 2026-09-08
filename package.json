@@ -1,7 +1,7 @@
 {
   "name": "linkedin-mcp-server",
   "version": "1.0.0",
-  "description": "MCP server for posting Gamma carousel exports (and other content) to LinkedIn via the official LinkedIn API",
+  "description": "MCP server for a personal LinkedIn profile: publishing, commenting, prospect follow-up, and an honest capability report of what LinkedIn's API allows",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
