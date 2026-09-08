@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { AxiosError, AxiosHeaders } from "axios";
-import { LinkedInAuthError, handleLinkedInApiError } from "../src/services/linkedin-client.js";
+import {
+  LinkedInAuthError,
+  CapabilityUnavailableError,
+  handleLinkedInApiError,
+} from "../src/services/linkedin-client.js";
 
 /** Builds an AxiosError shaped the way axios actually delivers HTTP failures. */
 function httpError(status: number, body?: unknown): AxiosError {
@@ -25,10 +29,34 @@ describe("handleLinkedInApiError", () => {
     expect(handleLinkedInApiError(httpError(401))).toContain("/oauth/linkedin/start");
   });
 
-  it("points at product/scope on 403 and includes LinkedIn's detail", () => {
+  it("blames the missing product rather than the token on 403", () => {
     const msg = handleLinkedInApiError(httpError(403, { message: "ACCESS_DENIED" }));
-    expect(msg).toContain("Permission denied");
+    expect(msg).toContain("denied this request");
     expect(msg).toContain("ACCESS_DENIED");
+    expect(msg).toContain("product or permission");
+    expect(msg).toContain("linkedin_capabilities");
+  });
+
+  it("names the capability, granted scopes and fallback tool on 403 when given them", () => {
+    const msg = handleLinkedInApiError(httpError(403), {
+      capability: "comment.write",
+      scopes: ["openid", "w_member_social"],
+      fallbackTool: "linkedin_outreach_run",
+    });
+    expect(msg).toContain("comment.write");
+    expect(msg).toContain("openid, w_member_social");
+    expect(msg).toContain("linkedin_outreach_run");
+  });
+
+  it("surfaces a capability error's own message and fallback", () => {
+    const err = new CapabilityUnavailableError(
+      "message.send",
+      "message.send is not available: LinkedIn restricts the Messages API to approved partners.",
+      "linkedin_outreach_run"
+    );
+    const msg = handleLinkedInApiError(err);
+    expect(msg).toContain("approved partners");
+    expect(msg).toContain("Use linkedin_outreach_run instead.");
   });
 
   it("reports 404 and 422 distinctly", () => {

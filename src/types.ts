@@ -7,6 +7,14 @@ export interface StoredTokens {
   refresh_token_expires_at?: number;
   /** Cached LinkedIn member id (the `sub` claim), so we don't refetch it every call. */
   member_id?: string;
+  /**
+   * Scopes LinkedIn actually granted, from the token response or a later
+   * introspection. Asking for a scope is not the same as receiving it, and
+   * without this a missing one only ever shows up as an unexplained 403.
+   */
+  scopes?: string[];
+  /** Epoch ms when `scopes` was last confirmed. */
+  scope_checked_at?: number;
 }
 
 export interface LinkedInUserInfo {
@@ -48,6 +56,12 @@ export interface AuthStatus {
    */
   hard_deadline_at?: number;
   hard_deadline_in_days?: number;
+  /** Scopes the token actually holds. Absent on records stored before scopes were tracked. */
+  scopes?: string[];
+  /** Scopes this app asks for that LinkedIn did not grant — the usual cause of a 403. */
+  missing_expected_scopes?: string[];
+  /** True when the stored record predates scope tracking, so `scopes` says nothing. */
+  scopes_unknown?: boolean;
   /** Set when the deadline is near, or when no refresh token was ever issued. */
   warning?: string;
   reauthorize_path: string;
