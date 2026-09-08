@@ -1,26 +1,117 @@
 # linkedin-mcp-server
 
-An MCP server that posts document/"carousel" content (e.g. a Gamma PDF export) to a
-personal LinkedIn profile via LinkedIn's official REST API. Built for the
-"post Gamma carousels to LinkedIn automatically" workflow, but the tools are
-generic enough for any PDF-carousel-to-LinkedIn use case.
+An MCP server for working a personal LinkedIn profile: publishing document
+("carousel") posts, commenting, and running prospect follow-up — plus an honest
+account of what LinkedIn's API will and won't let a self-serve app do.
 
 It also hosts the LinkedIn OAuth flow itself, so you don't need a separate
 public server just to catch the redirect — this one *is* that server.
 
+## What LinkedIn actually allows
+
+Read this before planning a workflow around it. Most of the interesting
+capabilities are gated, and the gate is LinkedIn's access model, not this code.
+
+| Capability | Status | Why |
+|---|---|---|
+| Publish posts / carousels | **Works** | `w_member_social`, self-serve "Share on LinkedIn" |
+| Read own profile | **Works** | OpenID Connect `profile` scope |
+| Comment / reply to a comment | **Probably — probe it** | The permission table lists `w_member_social`, but the endpoint sits under the Community Management API and may need that product too. Run `linkedin_capabilities` with `probe: "safe"` to classify it without posting anything. |
+| Read comments on your posts | **No** | Needs `r_member_social`, a closed permission: "access requests are not being accepted at this time". So comment URNs must be pasted in from the browser. |
+| Post/profile analytics | **No** | `memberCreatorPostAnalytics` needs `r_member_postAnalytics`, granted only via the Community Management API — "registered legal organizations for commercial use cases only". |
+| Send / read DMs | **No** | The Messages API is restricted to approved partners, *and* partners are separately barred from automated or scheduled sends. |
+| People search / prospecting | **No** | LinkedIn exposes no people-search endpoint at any tier. The Connections API is restricted and first-degree only. |
+
+Two consequences worth internalising:
+
+- **Outreach works by drafting, not sending.** `linkedin_outreach_run` renders
+  the next message and hands it to you to send, then tracks it once you confirm.
+  That is the normal, successful path — not a failure mode.
+- **There is no scheduler, deliberately.** Follow-ups are pull-based
+  (`linkedin_outreach_due`), because LinkedIn forbids automated sends even for
+  approved partners.
+
+Anything marked "No" above is only reachable through an unofficial provider you
+run yourself. That is off by default — see [Unofficial provider](#unofficial-provider).
+
 ## Tools
+
+**Posting**
 
 | Tool | What it does |
 |---|---|
-| `linkedin_get_profile` | Read-only. Confirms which account is authenticated. |
-| `linkedin_auth_status` | Read-only, no API call. Reports token expiry and the date a human must re-authorize by. |
-| `linkedin_upload_document` | Uploads a PDF (from a URL) to LinkedIn as a document asset. Doesn't publish anything. |
-| `linkedin_create_post` | Publishes a post referencing an already-uploaded document. Irreversible. |
-| `linkedin_post_carousel` | Does both steps in one call: download PDF → upload → publish. Irreversible. |
+| `linkedin_upload_document` | Uploads a PDF (from a URL) to LinkedIn as a document asset. Publishes nothing. |
+| `linkedin_create_post` | Publishes a post referencing an uploaded document. Two-phase, irreversible. |
+| `linkedin_post_carousel` | Download → upload → publish in one call. Two-phase, irreversible. |
+| `linkedin_comment_reply` | Comments on a post, or replies to a comment. Target is a pasted URL or URN. |
 
-Use `linkedin_upload_document` + `linkedin_create_post` separately if you want
-a review step between uploading and going live; use `linkedin_post_carousel`
-for full one-shot automation.
+**Outreach**
+
+| Tool | What it does |
+|---|---|
+| `linkedin_prospect_add` / `_import` / `_update` | Maintain the local prospect list. Marking someone `replied` stops their sequence. |
+| `linkedin_sequence_define` | Define a multi-step follow-up sequence with templates and delays. |
+| `linkedin_outreach_enroll` | Start a prospect on a sequence. |
+| `linkedin_outreach_due` | What follow-up is due now. |
+| `linkedin_outreach_run` | Render the next step — sends it if that is possible, otherwise drafts it. |
+| `linkedin_outreach_mark_sent` | Confirm a drafted step went out; advances the sequence. |
+
+**Diagnostics and safety**
+
+| Tool | What it does |
+|---|---|
+| `linkedin_auth_status` | Token expiry, granted scopes, re-authorization deadline. No API call. |
+| `linkedin_get_profile` | Confirms which account is authenticated. |
+| `linkedin_capabilities` | Per-capability verdict, why, and what to use instead. Optional live probing. |
+| `linkedin_post_history` | Posts published through this server. |
+| `linkedin_analytics_summary` | Real metrics when the scope exists; local cadence and an honest reason when it doesn't. |
+| `linkedin_kill_switch` | Halt or resume every outward action. |
+| `linkedin_audit_log` | What was done and what was refused. |
+
+`linkedin_send_message` appears only when an unofficial provider is configured.
+
+## Safety model
+
+The target is normally the operator's main LinkedIn account, so the defaults
+are conservative and the rails sit in the tool layer — where they also cover
+the unofficial provider, which bypasses the HTTP client entirely.
+
+- **Two-phase confirmation.** Every outward action previews first and returns a
+  single-use token *bound to a digest of the exact payload*. Editing the text
+  invalidates the token, so what you approved is what goes out. It is not a
+  `confirm: true` boolean, because a model would simply set one.
+- **Daily caps** (15 messages, 20 comments, 3 posts, 40 total) and a **90s
+  minimum gap** between paced actions. The throttle refuses with a retry time
+  rather than sleeping.
+- **Kill switch**, as a tool, an HTTP route (`POST /admin/kill-switch`, so you
+  can hit it from a phone), and an env var that cannot be cleared from a tool.
+- **Audit log** of every action including refusals, storing message digests
+  rather than message bodies.
+
+All tunable — see `.env.example`.
+
+## Unofficial provider
+
+LinkedIn licenses no third party to send member-to-member DMs or search people;
+services that appear to do so drive LinkedIn's internal endpoints with a
+session cookie, which breaks the User Agreement and can get an account
+restricted.
+
+So this repo ships the *seam*, not the mechanism: set `LINKEDIN_PROVIDER_URL`
+to an endpoint you run, and requests are forwarded there HMAC-signed. Enabling
+it needs two variables — `LINKEDIN_UNOFFICIAL_PROVIDER=http` and
+`LINKEDIN_UNOFFICIAL_ACK=i-accept-tos-risk` — so a copied `.env` cannot switch
+it on by accident. With it off, the capability report says so and nothing
+changes.
+
+## Development
+
+```bash
+npm install
+npm test          # unit tests, no credentials needed
+npm run typecheck # includes api/, which the build's tsconfig excludes
+npm run build
+```
 
 ## 1. Create the LinkedIn app (one-time, ~5 minutes)
 

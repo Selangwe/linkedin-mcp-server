@@ -7,7 +7,7 @@ export type AuditOutcome = "executed" | "blocked" | "failed" | "drafted";
 export interface AuditEntry {
   id: string;
   at: number;
-  action: SafetyAction | "outreach.step";
+  action: SafetyAction | "outreach.step" | "kill_switch";
   outcome: AuditOutcome;
   /** Who or what the action was aimed at — a post URN, a prospect id. */
   target?: string;

@@ -19,8 +19,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { LinkedInClient } from "./services/linkedin-client.js";
 import { createTokenStore } from "./services/token-store.js";
+import { createKeyValueStore } from "./services/kv-store.js";
 import { OAuthStore, verifyPkce, escapeHtml } from "./services/oauth-store.js";
-import { registerLinkedInTools } from "./tools/linkedin-tools.js";
+import { registerLinkedInTools, type ToolContext } from "./tools/index.js";
+import { CapabilityRegistry } from "./capabilities/registry.js";
+import { SafetyGuard } from "./safety/guard.js";
+import { OutreachEngine } from "./outreach/engine.js";
+import { PostHistory } from "./services/post-history.js";
+import { selectProvider } from "./providers/http.js";
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -36,17 +42,52 @@ const REDIRECT_URI = requireEnv("LINKEDIN_REDIRECT_URI");
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN; // optional but strongly recommended
 export const isAuthConfigured = Boolean(MCP_AUTH_TOKEN);
 
+/**
+ * The capability cache, outreach records, safety counters and audit log all
+ * live in the key-value store. On Vercel each invocation is a fresh process
+ * with no persistent disk, so the file driver would silently discard every one
+ * of them — a failed boot is far better than data that quietly disappears.
+ */
+if (process.env.VERCEL && (process.env.TOKEN_STORE_DRIVER || "file").toLowerCase() !== "kv") {
+  throw new Error(
+    "ERROR: running on Vercel requires TOKEN_STORE_DRIVER=kv. The file store has no persistent disk there, so tokens, outreach state, safety counters and the audit log would be lost between requests."
+  );
+}
+
 const tokenStore = createTokenStore();
+const capabilityKv = createKeyValueStore("capabilities");
+const safetyKv = createKeyValueStore("safety");
+const outreachKv = createKeyValueStore("outreach");
+const historyKv = createKeyValueStore("history");
+
+const provider = selectProvider();
+
 export const linkedInClient = new LinkedInClient(
   { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: REDIRECT_URI },
   tokenStore
 );
 
+const capabilities = new CapabilityRegistry(capabilityKv, linkedInClient.auth, provider);
+
+/**
+ * Built once at module scope and shared by every request. Each field is a thin
+ * object over the stores — all I/O is lazy — so a fresh McpServer per request
+ * costs nothing extra.
+ */
+const toolContext: ToolContext = {
+  client: linkedInClient,
+  capabilities,
+  guard: new SafetyGuard(safetyKv),
+  outreach: new OutreachEngine(outreachKv),
+  history: new PostHistory(historyKv),
+  provider,
+};
+
 const oauthStore = new OAuthStore();
 
 export function buildMcpServer(): McpServer {
   const server = new McpServer({ name: "linkedin-mcp-server", version: "1.0.0" });
-  registerLinkedInTools(server, linkedInClient);
+  registerLinkedInTools(server, toolContext);
   return server;
 }
 
@@ -108,6 +149,52 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/auth/status", bearerAuth, async (_req, res) => {
   try {
     res.json(await linkedInClient.getAuthStatus());
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/**
+ * What this connection can actually do, per capability. Same data as the
+ * linkedin_capabilities tool, reachable over HTTP for when the MCP layer
+ * itself is the thing misbehaving.
+ */
+app.get("/capabilities", bearerAuth, async (_req, res) => {
+  try {
+    res.json({
+      capabilities: await capabilities.snapshot(),
+      provider: provider ? provider.name : null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/** The audit trail, including refused actions. */
+app.get("/audit", bearerAuth, async (req, res) => {
+  try {
+    const limit = Number.parseInt(String(req.query.limit ?? "50"), 10);
+    res.json({
+      entries: await toolContext.guard.audit.recent({ limit: Number.isFinite(limit) ? limit : 50 }),
+      kill_switch: await toolContext.guard.killSwitch(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/**
+ * The emergency stop, reachable without an MCP client — so it can be hit from
+ * a phone when something is going wrong.
+ */
+app.post("/admin/kill-switch", bearerAuth, async (req, res) => {
+  try {
+    const { on, reason } = req.body as { on?: boolean; reason?: string };
+    if (typeof on !== "boolean") {
+      res.status(400).json({ error: "Body must be {\"on\": true|false, \"reason\"?: string}" });
+      return;
+    }
+    res.json(await toolContext.guard.setKillSwitch(on, reason));
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
