@@ -293,11 +293,22 @@ async function runStep(
 
   const capabilityId = CHANNEL_CAPABILITY[step.channel];
   const capability = capabilityId ? await c.capabilities.get(capabilityId) : null;
+  /**
+   * Only a DM through a configured provider can be sent from here.
+   *
+   * A linkedin_comment step deliberately cannot: commenting needs a target
+   * post URN, and a prospect record has nowhere to put one — the target comes
+   * from a human pasting a permalink into linkedin_comment_reply. So comment
+   * steps always draft, and the drafted text tells the operator what to post.
+   * (An earlier version let comment.write satisfy this check and then fell
+   * through to sendMessage, which would have delivered an intended public
+   * comment as a private message.)
+   */
   const canSend =
+    step.channel === "linkedin_dm" &&
+    Boolean(c.provider?.sendMessage) &&
     capability !== null &&
-    (capability.state === "available" || capability.state === "probable") &&
-    // A DM can only be sent by a provider; LinkedIn's own API never allows it.
-    (step.channel !== "linkedin_dm" || Boolean(c.provider?.sendMessage));
+    (capability.state === "available" || capability.state === "probable");
 
   if (!canSend) {
     const draft = await c.outreach.saveDraft({
@@ -333,24 +344,40 @@ async function runStep(
 
   // --- the auto-send path, only reachable with a real capability ---
   const spec = { action: "message.send" as const };
-  const verdict = await c.guard.check(spec, { to: prospect.full_name, text }, confirmToken);
+  const recipient = prospect.member_urn ?? prospect.profile_url ?? prospect.full_name;
+
+  /**
+   * The approval has to be bound to WHO receives this, not just what it says.
+   *
+   * Binding only the display name and the text meant two prospects sharing a
+   * name, whose step rendered identically, produced the same digest — so an
+   * approval for one could be replayed against the other and reach someone the
+   * human never saw. The recipient and prospect_id are the identity that
+   * actually matters, and they are in the preview too, so the human approves
+   * an address rather than a label.
+   */
+  const guarded = {
+    prospect_id: prospect.id,
+    recipient,
+    step_key: step.key,
+    text,
+  };
+
+  const verdict = await c.guard.check(spec, guarded, confirmToken);
   if (!verdict.ok) {
     if (verdict.kind === "needs_confirmation") {
       return {
         needs_confirmation: true,
         message: verdict.message,
         confirm_token: verdict.confirm_token,
-        preview: { to: prospect.full_name, channel: step.channel, text },
+        preview: { ...guarded, to: prospect.full_name, channel: step.channel },
       };
     }
     throw new Error(verdict.message);
   }
   await c.guard.reserve(spec);
 
-  const result = await c.provider!.sendMessage!({
-    recipient: prospect.member_urn ?? prospect.profile_url ?? prospect.full_name,
-    text,
-  });
+  const result = await c.provider!.sendMessage!({ recipient, text });
 
   await c.outreach.complete(prospectId, {
     step_key: step.key,

@@ -36,6 +36,23 @@ describe("parsePostUrn", () => {
     expect(parsePostUrn("  urn:li:activity:7123  ").urn).toBe("urn:li:activity:7123");
   });
 
+  it("never passes a malformed URN through to LinkedIn", () => {
+    // Junk appended to a valid URN is stripped back to the valid part rather
+    // than forwarded. Not exploitable downstream either way — the only
+    // consumer percent-encodes it — but the API should see a clean URN.
+    expect(parsePostUrn("urn:li:share:0/../../admin").urn).toBe("urn:li:share:0");
+
+    // Nothing salvageable is an error with a message that says what to paste.
+    expect(() => parsePostUrn("urn:li:activity:notanumber")).toThrow(/Could not find/);
+    expect(() => parsePostUrn("urn:li:share:")).toThrow(/Could not find/);
+  });
+
+  it("still accepts a well-formed compound comment URN", () => {
+    const parsed = parsePostUrn("urn:li:comment:(activity:7123456789,7999)");
+    expect(parsed.kind).toBe("comment");
+    expect(parsed.urn).toBe("urn:li:comment:(activity:7123456789,7999)");
+  });
+
   it("explains itself when there is no URN to find", () => {
     expect(() => parsePostUrn("https://www.linkedin.com/in/someone/")).toThrow(
       /Could not find a LinkedIn post or comment URN/

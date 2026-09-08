@@ -12,7 +12,13 @@ export interface ParsedUrn {
   kind: "share" | "ugcPost" | "activity" | "comment";
 }
 
-const URN_PATTERN = /^urn:li:(share|ugcPost|activity|comment):/;
+/**
+ * Anchored at both ends, so a malformed suffix is rejected here rather than
+ * being forwarded to LinkedIn. Comment URNs carry a parenthesised compound id
+ * (`urn:li:comment:(activity:123,456)`); the others are plain digits.
+ */
+const URN_PATTERN =
+  /^urn:li:(?:(?:share|ugcPost|activity):\d+|comment:\([A-Za-z0-9:,_-]+\))$/;
 
 /**
  * Accepts a URN as-is, or extracts one from any of:
