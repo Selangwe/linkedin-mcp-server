@@ -4,10 +4,23 @@ import type { CapabilityId } from "../capabilities/types.js";
 import type { LinkedInAuth } from "./linkedin-auth.js";
 import { isTransient } from "./linkedin-auth.js";
 
-/** Learns from live traffic what the token can actually do. Wired up in step 3. */
-export interface CapabilityObserver {
+/**
+ * Told about every response this client sees.
+ *
+ * Two jobs, both of which need to sit here because this is the only place that
+ * sees raw statuses: teaching the capability registry what the token can
+ * actually do, and letting the safety layer react to a 429 and count requests
+ * against the daily ceiling.
+ */
+export interface ResponseObserver {
+  /** A status worth attributing to a capability (2xx promotes, 403 demotes). */
   observe(id: CapabilityId, status: number, evidence: string): Promise<void>;
+  /** Every response, capability-tagged or not. */
+  onResponse?(status: number, retryAfterSeconds?: number): Promise<void>;
 }
+
+/** @deprecated Kept as an alias so existing imports keep compiling. */
+export type CapabilityObserver = ResponseObserver;
 
 export interface LinkedInRequest {
   method: "GET" | "POST" | "PUT" | "DELETE";
@@ -66,11 +79,25 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export class LinkedInHttp {
   private readonly axios: AxiosInstance;
 
+  private observer?: ResponseObserver;
+
   constructor(
     private readonly auth: LinkedInAuth,
-    private readonly observer?: CapabilityObserver
+    observer?: ResponseObserver
   ) {
     this.axios = axios.create({ baseURL: LINKEDIN_API_BASE });
+    this.observer = observer;
+  }
+
+  /**
+   * Attaches the observer after construction.
+   *
+   * Needed because the capability registry depends on this client's auth, so
+   * the two cannot both be constructor arguments of each other. app.ts builds
+   * the client, then the registry, then wires the observer back in here.
+   */
+  setObserver(observer: ResponseObserver): void {
+    this.observer = observer;
   }
 
   async request<T = unknown>(req: LinkedInRequest): Promise<LinkedInResult<T>> {
@@ -117,6 +144,7 @@ export class LinkedInHttp {
     for (let attempt = 0; attempt <= (idempotent ? RETRY_BACKOFF_MS.length : 0); attempt++) {
       try {
         const resp = await this.axios.request<T>(config);
+        await this.noteResponse(resp.status);
         await this.note(capability, resp.status, `${config.method} ${config.url}`);
         return {
           data: resp.data,
@@ -130,6 +158,7 @@ export class LinkedInHttp {
 
         const status = axios.isAxiosError(error) ? error.response?.status : undefined;
         if (status) {
+          await this.noteResponse(status, retryAfterSeconds(error));
           await this.note(
             capability,
             status,
@@ -149,6 +178,16 @@ export class LinkedInHttp {
     if (!id || !this.observer) return;
     try {
       await this.observer.observe(id, status, evidence);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Same best-effort contract: bookkeeping must never fail a real call. */
+  private async noteResponse(status: number, retryAfter?: number): Promise<void> {
+    if (!this.observer?.onResponse) return;
+    try {
+      await this.observer.onResponse(status, retryAfter);
     } catch {
       /* ignore */
     }
@@ -219,11 +258,16 @@ export class LinkedInHttp {
 
 /** Honour LinkedIn's Retry-After when it sends one, rather than guessing. */
 function retryAfterMs(error: unknown): number | undefined {
+  const seconds = retryAfterSeconds(error);
+  return seconds === undefined ? undefined : Math.min(seconds, 30) * 1000;
+}
+
+function retryAfterSeconds(error: unknown): number | undefined {
   if (!axios.isAxiosError(error)) return undefined;
   const raw = error.response?.headers?.["retry-after"];
   if (!raw) return undefined;
   const seconds = Number.parseInt(String(raw), 10);
-  return Number.isFinite(seconds) && seconds >= 0 ? Math.min(seconds, 30) * 1000 : undefined;
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
 }
 
 function detailOf(error: unknown): string {

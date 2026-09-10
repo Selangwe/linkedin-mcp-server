@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import type { IKeyValueStore } from "../services/kv-store.js";
+import { OutreachError } from "../services/errors.js";
 import {
   TERMINAL_STATUSES,
   type Draft,
@@ -24,7 +25,7 @@ const DEDUPE_TTL_SECONDS = 365 * 24 * 3600;
  */
 const INDEX_SOFT_LIMIT = 2000;
 
-export class OutreachError extends Error {}
+export { OutreachError };
 
 export function prospectId(input: { profile_url?: string; full_name: string; company?: string }): string {
   const basis = input.profile_url
@@ -164,16 +165,38 @@ export class OutreachEngine {
 
   // --- sequences -------------------------------------------------------
 
+  /**
+   * Creates a sequence, or replaces one that nobody is mid-way through.
+   *
+   * The id is derived from the name, so redefining a sequence overwrites it in
+   * place — and an enrollment only stores a bare `step_index` into the step
+   * array. Changing the steps under a live enrollment therefore re-points that
+   * prospect at a different message, or at a step that no longer exists. So a
+   * redefinition that would change the steps is refused while anyone is still
+   * running the old version.
+   */
   async defineSequence(name: string, steps: SequenceStep[]): Promise<Sequence> {
     if (!steps.length) throw new OutreachError("A sequence needs at least one step.");
     const keys = new Set(steps.map((s) => s.key));
     if (keys.size !== steps.length) throw new OutreachError("Step keys must be unique within a sequence.");
 
+    const id = crypto.createHash("sha1").update(name.toLowerCase()).digest("hex").slice(0, 12);
+    const existing = await this.getSequence(id);
+
+    if (existing && JSON.stringify(existing.steps) !== JSON.stringify(steps)) {
+      const live = await this.activeEnrollmentCount(id);
+      if (live > 0) {
+        throw new OutreachError(
+          `"${name}" already exists and ${live} prospect${live === 1 ? " is" : "s are"} part-way through it. Changing its steps now would move them onto a different message. Give the new version a different name, or take those prospects off it first with linkedin_prospect_update (status: 'paused').`
+        );
+      }
+    }
+
     const sequence: Sequence = {
-      id: crypto.createHash("sha1").update(name.toLowerCase()).digest("hex").slice(0, 12),
+      id,
       name,
       steps,
-      created_at: Date.now(),
+      created_at: existing?.created_at ?? Date.now(),
     };
     await this.kv.set(`sequence:${sequence.id}`, sequence);
 
@@ -183,6 +206,14 @@ export class OutreachEngine {
       await this.kv.set("index:sequences", index);
     }
     return sequence;
+  }
+
+  /** Prospects still mid-sequence on this id — the ones a redefinition would strand. */
+  private async activeEnrollmentCount(sequenceId: string): Promise<number> {
+    const index = await this.listProspects();
+    return index.filter(
+      (row) => row.sequence_id === sequenceId && !TERMINAL_STATUSES.includes(row.status)
+    ).length;
   }
 
   async getSequence(id: string): Promise<Sequence | null> {
@@ -263,12 +294,6 @@ export class OutreachEngine {
         `The sequence for ${prospect.full_name} is stopped (status: ${prospect.status}).`
       );
     }
-    if (TERMINAL_STATUSES.includes(prospect.status)) {
-      throw new OutreachError(
-        `${prospect.full_name} is marked ${prospect.status}, so no further steps should be sent.`
-      );
-    }
-
     const sequence = await this.getSequence(enrollment.sequence_id);
     if (!sequence) throw new OutreachError(`Sequence ${enrollment.sequence_id} no longer exists.`);
 
@@ -277,6 +302,19 @@ export class OutreachEngine {
       throw new OutreachError(
         `${prospect.full_name} has finished every step of "${sequence.name}".`
       );
+    }
+
+    // A terminal status normally ends the sequence. `stop_if_replied: false`
+    // is the per-step opt-out for a 'replied' prospect — useful for a genuine
+    // conversation continuation. It never overrides do_not_contact, which is
+    // an instruction, not a stage.
+    if (TERMINAL_STATUSES.includes(prospect.status)) {
+      const overridable = prospect.status === "replied" && step.stop_if_replied === false;
+      if (!overridable) {
+        throw new OutreachError(
+          `${prospect.full_name} is marked ${prospect.status}, so no further steps should be sent.`
+        );
+      }
     }
 
     const text = render(step, prospect);

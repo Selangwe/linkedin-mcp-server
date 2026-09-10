@@ -245,6 +245,16 @@ Returns JSON: { prospect, next_due_at?, sequence_state }`,
       if (!prospect?.enrollment) {
         throw new Error(`No enrolled prospect with id ${args.prospect_id}.`);
       }
+      // Only a step that was drafted and is waiting on a human can be marked
+      // sent. Without this, a repeat call advances again and records the NEXT
+      // step as sent — with an empty digest and a dedupe key — so that step is
+      // never drafted or delivered to anyone.
+      if (prospect.enrollment.state !== "awaiting_send") {
+        throw new Error(
+          `${prospect.full_name} has no step awaiting a send (sequence state: ${prospect.enrollment.state}). Run linkedin_outreach_run first to draft the next step; if it was already marked sent, there is nothing to do.`
+        );
+      }
+
       const sequence = await c.outreach.getSequence(prospect.enrollment.sequence_id);
       const step = sequence?.steps[prospect.enrollment.step_index];
       const stepKey = args.step_key ?? step?.key;
@@ -375,7 +385,8 @@ async function runStep(
     }
     throw new Error(verdict.message);
   }
-  await c.guard.reserve(spec);
+  const reserved = await c.guard.reserve(spec);
+  if (!reserved.ok) throw new Error(reserved.message);
 
   const result = await c.provider!.sendMessage!({ recipient, text });
 

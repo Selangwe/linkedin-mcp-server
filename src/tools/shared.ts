@@ -205,10 +205,12 @@ async function runGuard<S extends z.ZodRawShape>(
   const payload = spec.previewOf ? spec.previewOf(args) : stripConfirm(args);
   const token = (args as { confirm_token?: string }).confirm_token;
 
-  const verdict = await ctx.guard.check(action, payload, token);
+  let verdict = await ctx.guard.check(action, payload, token);
   if (verdict.ok) {
-    await ctx.guard.reserve(action);
-    return null;
+    // reserve() makes the final, atomic cap decision — check()'s read is
+    // advisory because it also runs for previews, which must not spend budget.
+    verdict = await ctx.guard.reserve(action);
+    if (verdict.ok) return null;
   }
 
   await ctx.guard.audit.record({

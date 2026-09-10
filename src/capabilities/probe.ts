@@ -31,14 +31,28 @@ const NONEXISTENT_SHARE_URN = "urn:li:share:0";
  * too. That is exactly why a pass here yields "probable" and never
  * "available" — only a real comment (probe='live') proves the write works.
  */
+async function resolveMemberUrn(http: LinkedInHttp, auth: LinkedInAuth): Promise<string> {
+  const tokens = await auth.getValidAccessToken();
+  if (tokens.member_id) return `urn:li:person:${tokens.member_id}`;
+  const info = await http.request<{ sub: string }>({
+    method: "GET",
+    path: "/v2/userinfo",
+    versioned: false,
+  });
+  await auth.persistMemberId(info.data.sub);
+  return `urn:li:person:${info.data.sub}`;
+}
+
 export async function probeCommentWrite(
   http: LinkedInHttp,
   auth: LinkedInAuth,
   registry: CapabilityRegistry
 ): Promise<ProbeOutcome> {
-  const memberUrn = await auth
-    .getValidAccessToken()
-    .then((t) => (t.member_id ? `urn:li:person:${t.member_id}` : undefined));
+  // Must be a real URN. Sending `actor: undefined` makes LinkedIn answer 400
+  // for the missing required field, which this probe would then read as
+  // "permission passed, entity missing" — recording comment.write as probable
+  // without permission ever having been evaluated.
+  const memberUrn = await resolveMemberUrn(http, auth);
 
   try {
     await http.request({

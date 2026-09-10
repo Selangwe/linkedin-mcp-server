@@ -25,10 +25,20 @@ export class MemoryKv implements IKeyValueStore {
     this.data.delete(key);
   }
 
+  /**
+   * Atomic, like Redis INCRBY — the read and write happen in one synchronous
+   * step with no await between them. That matters: the safety guard relies on
+   * incr being atomic to decide daily caps, and a fake that yields mid-update
+   * would make a correct guard look broken (and a broken one look fine).
+   */
   async incr(key: string, by = 1, ttlSeconds?: number): Promise<number> {
-    const current = (await this.get<number>(key)) ?? 0;
-    const next = current + by;
-    await this.set(key, next, ttlSeconds);
+    const entry = this.data.get(key);
+    const live = entry && (!entry.expiresAt || entry.expiresAt >= Date.now());
+    const next = (live ? (entry.value as number) : 0) + by;
+    this.data.set(key, {
+      value: next,
+      expiresAt: live ? entry.expiresAt : ttlSeconds ? Date.now() + ttlSeconds * 1000 : undefined,
+    });
     return next;
   }
 }

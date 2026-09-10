@@ -68,6 +68,25 @@ export const linkedInClient = new LinkedInClient(
 );
 
 const capabilities = new CapabilityRegistry(capabilityKv, linkedInClient.auth, provider);
+const guard = new SafetyGuard(safetyKv);
+
+/**
+ * Feeds every LinkedIn response back into the capability registry and the
+ * safety layer.
+ *
+ * Attached after construction rather than passed in, because the registry
+ * needs the client's auth and so cannot also be one of its constructor
+ * arguments. Without this wiring the `capability:` tags on the domain calls
+ * are inert, a 429 never pauses writes, and the daily request ceiling never
+ * counts anything.
+ */
+linkedInClient.http.setObserver({
+  observe: (id, status, evidence) => capabilities.observe(id, status, evidence),
+  async onResponse(status, retryAfterSeconds) {
+    if (status === 429) await guard.noteRateLimit(retryAfterSeconds ?? 300);
+    await guard.noteRequest();
+  },
+});
 
 /**
  * Built once at module scope and shared by every request. Each field is a thin
@@ -77,7 +96,7 @@ const capabilities = new CapabilityRegistry(capabilityKv, linkedInClient.auth, p
 const toolContext: ToolContext = {
   client: linkedInClient,
   capabilities,
-  guard: new SafetyGuard(safetyKv),
+  guard,
   outreach: new OutreachEngine(outreachKv),
   history: new PostHistory(historyKv),
   provider,

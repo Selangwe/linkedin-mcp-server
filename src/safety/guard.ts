@@ -184,15 +184,49 @@ export class SafetyGuard {
   }
 
   /**
-   * Books the action against today's budget. Called *before* executing:
-   * over-counting a call that then fails is the safe direction, undercounting
-   * is not.
+   * Books the action against today's budget, atomically, and reports whether
+   * the budget actually had room.
+   *
+   * check() reads the counters without incrementing, because it also runs for
+   * the preview half of a two-phase write and a preview must not spend budget.
+   * That leaves a window where two confirmed actions both pass a cap with one
+   * slot left — which is the race kv.incr() exists to close. So the real
+   * decision is made here, on the incremented value, and a losing caller gives
+   * its slot back.
+   *
+   * Called *before* executing: over-counting a call that then fails is the
+   * safe direction, undercounting is not.
    */
-  async reserve(spec: ActionSpec): Promise<void> {
+  async reserve(spec: ActionSpec): Promise<GuardVerdict> {
     const cost = spec.cost ?? 1;
-    await this.kv.incr(`safety:count:${spec.action}:${today()}`, cost, COUNTER_TTL_SECONDS);
-    await this.kv.incr(`safety:count:total:${today()}`, cost, COUNTER_TTL_SECONDS);
+    const actionKey = `safety:count:${spec.action}:${today()}`;
+    const totalKey = `safety:count:total:${today()}`;
+
+    const used = await this.kv.incr(actionKey, cost, COUNTER_TTL_SECONDS);
+    const cap = safetyConfig.capFor(spec.action);
+    if (used > cap) {
+      await this.kv.incr(actionKey, -cost, COUNTER_TTL_SECONDS);
+      return {
+        ok: false,
+        kind: "cap",
+        message: `Daily cap reached for ${spec.action}: ${cap}/${cap} used today. This limit protects the account from looking automated; raise it with the matching LINKEDIN_CAP_* env var if it is genuinely too low.`,
+      };
+    }
+
+    const totalUsed = await this.kv.incr(totalKey, cost, COUNTER_TTL_SECONDS);
+    const totalCap = safetyConfig.totalCap();
+    if (totalUsed > totalCap) {
+      await this.kv.incr(totalKey, -cost, COUNTER_TTL_SECONDS);
+      await this.kv.incr(actionKey, -cost, COUNTER_TTL_SECONDS);
+      return {
+        ok: false,
+        kind: "cap",
+        message: `Daily cap reached across all LinkedIn actions: ${totalCap}/${totalCap} used today. Raise LINKEDIN_CAP_TOTAL if that is too low.`,
+      };
+    }
+
     await this.kv.set(`safety:last:${spec.action}`, Date.now(), COUNTER_TTL_SECONDS);
+    return { ok: true };
   }
 
   /** Pauses writes after LinkedIn rate-limits us, so one 429 doesn't become a burst. */
@@ -222,11 +256,36 @@ export class SafetyGuard {
     return state;
   }
 
-  /** Daily ceiling on total LinkedIn requests; LinkedIn publishes no per-endpoint limits. */
+  /**
+   * Counts a LinkedIn request against the daily ceiling, and pauses writes once
+   * it is reached.
+   *
+   * LinkedIn publishes no per-endpoint rate limits, so this is a self-imposed
+   * bound: cheap insurance against a loop burning through an unknown quota and
+   * getting the app throttled for the rest of the day. Reads keep working — the
+   * cooldown that check() consults only gates writes.
+   */
   async noteRequest(): Promise<{ used: number; ceiling: number; warn: boolean }> {
     const ceiling = safetyConfig.dailyRequestCeiling();
     const used = await this.kv.incr(`safety:requests:${today()}`, 1, COUNTER_TTL_SECONDS);
+
+    if (used >= ceiling) {
+      const untilMidnight = Math.max(
+        60,
+        Math.ceil((new Date().setUTCHours(24, 0, 0, 0) - Date.now()) / 1000)
+      );
+      await this.kv.set("safety:cooldown_until", Date.now() + untilMidnight * 1000, 24 * 3600);
+    }
+
     return { used, ceiling, warn: used >= ceiling * 0.8 };
+  }
+
+  /** How much of today's self-imposed request budget is gone. */
+  async requestUsage(): Promise<{ used: number; ceiling: number }> {
+    return {
+      used: (await this.kv.get<number>(`safety:requests:${today()}`)) ?? 0,
+      ceiling: safetyConfig.dailyRequestCeiling(),
+    };
   }
 }
 

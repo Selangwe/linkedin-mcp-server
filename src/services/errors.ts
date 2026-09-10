@@ -19,6 +19,14 @@ export class CapabilityUnavailableError extends Error {
   }
 }
 
+/**
+ * Thrown by the outreach engine for a condition the caller can act on — a
+ * prospect who already replied, a finished sequence, a template placeholder
+ * with no value. These messages name the fix, so they must not be flattened
+ * into "Unexpected error occurred" by the handler below.
+ */
+export class OutreachError extends Error {}
+
 /** Thrown when a safety rail (kill switch, daily cap, throttle) refuses an action. */
 export class SafetyBlockedError extends Error {
   constructor(
@@ -49,6 +57,7 @@ export function handleLinkedInApiError(error: unknown, ctx: ApiErrorContext = {}
     return `Error: ${error.message}${fallback}`;
   }
   if (error instanceof SafetyBlockedError) return `Error: ${error.message}`;
+  if (error instanceof OutreachError) return `Error: ${error.message}`;
 
   if (axios.isAxiosError(error)) {
     const err = error as AxiosError<{ message?: string; serviceErrorCode?: number }>;

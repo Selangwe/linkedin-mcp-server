@@ -132,7 +132,7 @@ Returns JSON: { entries: [{ id, at, action, outcome, target?, payload_digest?, d
     handler: async (args, c) => {
       const entries = await c.guard.audit.recent(args);
       const kill = await c.guard.killSwitch();
-      return { entries, kill_switch: kill };
+      return { entries, kill_switch: kill, request_usage: await c.guard.requestUsage() };
     },
   });
 }
@@ -170,7 +170,8 @@ async function runLiveProbe(
     }
     throw new Error(verdict.message);
   }
-  await c.guard.reserve(spec);
+  const reserved = await c.guard.reserve(spec);
+  if (!reserved.ok) throw new Error(reserved.message);
 
   const actorUrn = await c.client.getMemberUrn();
   const result = await createComment(c.client.http, {
