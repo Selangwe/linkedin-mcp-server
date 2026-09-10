@@ -21,6 +21,13 @@ export interface IKeyValueStore {
   get<T = unknown>(key: string): Promise<T | null>;
   set<T = unknown>(key: string, value: T, ttlSeconds?: number): Promise<void>;
   del(key: string): Promise<void>;
+  /**
+   * Adds to a counter and returns the new value, setting the TTL when the key
+   * is first created. Used for daily action caps, where reading and then
+   * writing would let two concurrent calls both pass a cap that only had one
+   * slot left.
+   */
+  incr(key: string, by?: number, ttlSeconds?: number): Promise<number>;
 }
 
 interface FileEnvelope<T> {
@@ -70,6 +77,20 @@ export class FileKeyValueStore implements IKeyValueStore {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
   }
+
+  /**
+   * Read-modify-write, so it is NOT atomic across processes. That is
+   * acceptable here: the file backend is for local development and
+   * single-process hosts. On Vercel, where concurrent invocations are separate
+   * processes, TOKEN_STORE_DRIVER=kv is required anyway (app.ts asserts it)
+   * and RedisKeyValueStore.incr below is a real atomic INCRBY.
+   */
+  async incr(key: string, by = 1, ttlSeconds?: number): Promise<number> {
+    const current = (await this.get<number>(key)) ?? 0;
+    const next = current + by;
+    await this.set(key, next, ttlSeconds);
+    return next;
+  }
 }
 
 // Typed loosely (rather than importing Redis's own type) to avoid a hard
@@ -80,6 +101,8 @@ interface LooseRedisClient {
   get: (key: string) => Promise<unknown>;
   set: (key: string, value: unknown, opts?: Record<string, unknown>) => Promise<unknown>;
   del: (key: string) => Promise<unknown>;
+  incrby: (key: string, increment: number) => Promise<number>;
+  expire: (key: string, seconds: number) => Promise<unknown>;
 }
 
 export class RedisKeyValueStore implements IKeyValueStore {
@@ -125,6 +148,15 @@ export class RedisKeyValueStore implements IKeyValueStore {
   async del(key: string): Promise<void> {
     const redis = await this.client();
     await redis.del(key);
+  }
+
+  async incr(key: string, by = 1, ttlSeconds?: number): Promise<number> {
+    const redis = await this.client();
+    const next = await redis.incrby(key, by);
+    // Only set the expiry on creation; re-arming it on every increment would
+    // keep a busy counter alive indefinitely instead of rolling over.
+    if (ttlSeconds && next === by) await redis.expire(key, ttlSeconds);
+    return next;
   }
 }
 
